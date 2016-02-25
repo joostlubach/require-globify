@@ -5,7 +5,8 @@ var fs = require('fs');
 var modes = {
   'expand': require('./modes/expand'),
   'hash': require('./modes/hash'),
-  'list': require('./modes/list')
+  'list': require('./modes/list'),
+  'es6': require('./modes/es6')
 };
 
 module.exports = require('browserify-transform-tools').makeRequireTransform(
@@ -20,52 +21,19 @@ module.exports = require('browserify-transform-tools').makeRequireTransform(
 
     var config, pattern, globOpts, mode, result, sei;
 
-    // only trigger if require was used with exactly 2 params that match our expectations
-    if (args.length !== 2 || typeof args[0] !== 'string' || typeof args[1] !== 'object') {
+    // only trigger if require was used with a wildcard in it
+    if (typeof args[0] !== 'string' || args[0].indexOf('*') == -1) {
       return done();
     }
 
     // get the second param to require as our config
-    config = args[1];
-
-    var skipExtCompat = typeof config.resolve !== 'undefined';
+    config = args[1] || {mode: 'es6'};
 
     // backwards compatibility for glob and hash options, replaced by mode
-    if (config.glob) {
-      config.mode = "expand";
-    } else if (config.hash) {
-      config.mode = "hash";
-      if (config.hash === "path") {
-        config.resolve = ["path"];
-      }
-    }
-
-    // set default resolve option to ["path-reduce", "strip-ext"]
-    config.resolve = config.resolve || ["path-reduce", "strip-ext"];
+    // set default resolve option to ["path-reduce", "strip-ext", "camelize"]
+    config.resolve = config.resolve || ["path-reduce", "strip-ext", 'camelize'];
     if (!Array.isArray(config.resolve)) {
       config.resolve = [config.resolve];
-    }
-
-    // backwards compatibility for ext option
-    if (!skipExtCompat) {
-    if (typeof config.ext === 'undefined' || config.ext === false) {
-      if (config.resolve.indexOf('strip-ext') === -1) {
-        config.resolve.push('strip-ext');
-      }
-    } else { // remove ext
-      sei = config.resolve.indexOf('strip-ext');
-      // this wont work if strip-ext is there multiple times
-      // but what's the change of that happening?
-      if (sei !== -1) {
-        config.resolve.splice(sei, 1);
-      }
-    }
-    }
-
-    // if the config object doesn't match our specs, abort
-    if (typeof config.mode === 'undefined') {
-      console.warn('doesn\'t match require-globify api');
-      return done();
     }
 
     // find mode
@@ -82,31 +50,50 @@ module.exports = require('browserify-transform-tools').makeRequireTransform(
     // take the first param to require as pattern
     pattern = args[0];
 
-    // use any additional options given
-    globOpts = config.options || {};
+    var cwds = [];
+    if (pattern.charAt(0) == '.') {
+      // Relative path: use the current dirname.
+      cwds.push(path.dirname(opts.file));
+    } else {
+      // Absolute path: use the NODE_PATH and optionally paths specified to browserify.
+      var nodePaths = (process.env.NODE_PATH || '').split(':');
+      cwds = cwds.concat(nodePaths);
 
-    // if no override; set the cwd for glob to the dirname of the current file
-    globOpts.cwd = globOpts.cwd || path.dirname(opts.file);
-    // only match files
-    globOpts.nodir = true;
-
-    glob(pattern, globOpts, function(err, files) {
-      // if there was an error with glob, abort here
-      if (err) {
-        return done(err);
+      if (opts.config && opts.config._flags && opts.config._flags.paths) {
+        cwds = cwds.concat(opts.config._flags.paths.map((p) => path.resolve(p)));
       }
+    }
 
-      try {
-        // sort files to ensure consistent order upon multiple runs
-        files.sort();
+    cwds = cwds.filter((cwd) => !!cwd);
 
-        result = mode(opts.file, files, config);
+    // Try with each CWD.
+    function tryWithCwd(cwd) {
+      return new Promise((resolve, reject) => {
+        var opts = {};
+        Object.assign(opts, config.options);
+        opts.nodir = true;
+        opts.cwd = cwd;
 
-        done(null, result);
-      } catch (err) {
-        return done(err);
-      }
+        glob(pattern, opts, function(err, files) {
+          // if there was an error with glob, abort here
+          if (err) {
+            reject(err);
+          } else {
+            files.sort();
+            resolve(files);
+          }
+        });
+      });
+    }
 
+    Promise.all(cwds.map((cwd) => tryWithCwd(cwd))).then((fileses) => {
+      var allFiles = fileses.reduce((ff, f) => ff.concat(f), []);
+      var result = mode(opts.file, allFiles, config);
+
+      done(null, result);
+    }, (err) => {
+      done(err);
     });
+
   }
 );
