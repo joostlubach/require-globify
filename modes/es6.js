@@ -28,11 +28,11 @@ module.exports = function(base, files, config) {
 
 
   // return object-mapped string
-  return "{" + files.reduce(
+  return "({" + files.reduce(
     function(acc, file, idx, arr) {
       return (acc ? acc + "," : "") +
         "'" + hash[file].replace(/\\/g, '/') + "': " +
         "require('" + file + "').default";
-    }, false) + "}";
+    }, false) + "})";
 
 };
